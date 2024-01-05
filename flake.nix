@@ -26,11 +26,38 @@
         hasura-cli-wrapped = import ./hasura-cli-wrapped.nix {
           inherit (pkgs.stdenv) mkDerivation;
           inherit (pkgs) hasura-cli makeWrapper;
-          inherit (packages) hasura-cli_ext-bin;
         };
       };
     in
     {
       inherit overlays packages;
+      devShells.default = pkgs.mkShell rec {
+        name = "mekorp-dev";
+        nativeBuildInputs = with pkgs; [
+          go_1_20
+          # use docker from nixos
+          postgresql
+          packages.hasura-cli-wrapped
+        ];
+        # ENV
+        passthru.env = rec {
+          PGDATABASE = "appdata";
+          PGHOST = "localhost";
+          PGPORT = "5433";
+          PGPASSWORD = "postgrespassword";
+          PGUSER = "postgres";
+          PGSSLMODE = "disable";
+          PGURL = "postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${PGDATABASE}?sslmode=${PGSSLMODE}";
+        };
+        shellHook =
+          let
+            exportEnv = with builtins; concatStringsSep "\n" (attrValues (mapAttrs
+              (k: v: ''export ${k}="${v}"'')
+              passthru.env));
+          in
+            /*bash*/ ''
+            ${exportEnv}
+          '';
+      };
     });
 }
