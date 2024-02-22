@@ -1,0 +1,101 @@
+database := env_var('PGDATABASE')
+cache := cache_directory()
+
+download-dump env='prod':
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # make cache dir
+    DIR={{ cache }}/mekorp-pgdump/
+    mkdir -p ${DIR}
+    # select snapshot to restore
+    DUMP_PATH=$(s3cmd ls s3://mekorp-pgdump/{{ env }}/  | tr -s ' ' | grep '^ DIR' | cut -d' ' -f3 | sort -r | sk)
+    DUMP_NAME=$(basename $DUMP_PATH)
+    # download snapshot to restore
+    printf 'downloading dump: %s\n' ${DUMP_PATH}
+    if [[ -e ${DIR}/${DUMP_NAME} ]]; then
+        printf 'removing cache: %s\n' ${DIR}/${DUMP_NAME}
+        rm -rf ${DIR}/${DUMP_NAME}
+    fi
+    mkdir -p ${DIR}/${DUMP_NAME} &&
+    s3cmd get --recursive ${DUMP_PATH} ${DIR}/${DUMP_NAME}
+
+restore-dump dump: clean-db && (restart 'graphql-engine')
+    pg_restore -1 --no-owner --no-privileges --format=dir --dbname=appdata {{ dump }}
+
+choose-migration:
+    @cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel) && \
+    hasura migrate apply --database-name default --skip-execution --version $(ls migrations/default/ | sort -r | sk | cut -d_ -f1)
+
+restart *service:
+    @cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel) && \
+    docker compose --project-name mekorp-stack --file deployments/docker-compose.debug_local.yaml restart {{ service }}
+
+apply-migrations: clean-db (restart 'graphql-engine')
+    #!/bin/sh
+    cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel)
+    # wait until hasura container is ready to accept connections
+    printf 'waiting for hasura to come up'
+    while ! [ $(curl -sL 'http://127.0.0.1:8080/v1/version') ]; do printf "."; sleep 0.5; done
+    echo # new line
+    hasura --skip-update-check migrate apply --all-databases
+    hasura --skip-update-check metadata apply
+
+apply-test-data: apply-migrations
+    #!/bin/sh
+    cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel)
+    LOG=$(mktemp)
+    cleanup() {
+      rm $LOG
+    }
+    trap cleanup EXIT
+    for testfile in testdata/integration/*/up.sql; do
+      printf "\r\e[34mseeding\e[0m %-81s" `realpath ${testfile}`
+      if psql -v ON_ERROR_STOP=1 -1f "${testfile}" &> $LOG; then
+        printf "\r\e[32mseeded \e[0m\n"
+      else
+        printf "\r\e[31mfailed \e[0m\n"
+        cat $LOG
+        exit 1
+      fi
+    done
+
+reapply-migration:
+    #!/bin/sh
+    cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel)
+    hasura --skip-update-check migrate apply --all-databases --down 1
+    hasura --skip-update-check migrate apply --all-databases --up   1
+    hasura --skip-update-check metadata apply
+
+hasura-console:
+    #!/bin/sh
+    cd {{ invocation_directory() }} && cd $(git rev-parse --show-toplevel)
+    pkill -f bin/hasura
+    hasura console --no-browser &
+    echo
+
+clean-db:
+    #!/bin/sh
+    printf "\r\e[34mcleaning\e[0m database \n"
+    dropdb --force --if-exists appdata && createdb appdata
+    dropdb --force --if-exists metadata && createdb metadata
+    dropdb --force --if-exists template_storage && createdb template_storage
+    psql -qc 'DROP USER hasura_user'
+    psql -qc 'DROP USER render_service_user'
+    psql -q <<-EOSQL
+      CREATE USER hasura_user WITH PASSWORD 'W}\m!0,83B-EvD{!';
+      \connect metadata
+      CREATE SCHEMA IF NOT EXISTS hdb_catalog;
+      ALTER SCHEMA hdb_catalog OWNER TO hasura_user;
+      GRANT SELECT ON ALL TABLES IN SCHEMA information_schema TO hasura_user;
+      GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO hasura_user;
+      CREATE EXTENSION IF NOT EXISTS pgcrypto;
+      GRANT CREATE ON DATABASE metadata TO hasura_user;
+      \connect appdata
+      GRANT ALL PRIVILEGES ON DATABASE appdata TO hasura_user;
+      CREATE extension IF NOT EXISTS unit;
+      CREATE USER render_service_user WITH PASSWORD 'balskdfjbsal';
+      \connect template_storage
+      GRANT ALL PRIVILEGES ON DATABASE template_storage TO render_service_user;
+      GRANT CREATE ON schema public TO render_service_user;
+    EOSQL
+
