@@ -22,7 +22,7 @@ case "$1" in
         find_db "$INSTANCE" "$DB"
         ;;
     "conn")
-        conn_str "$INSTANCE" "${2:-$(find_db "$INSTANCE" "$DB")}"
+        conn_str "$INSTANCE" "$(find_db "$INSTANCE" "$DB")"
         ;;
     *)
         printf "expect conn|db, got '%s'\n" "$1"> /dev/stderr
