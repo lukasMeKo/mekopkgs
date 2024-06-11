@@ -120,6 +120,10 @@
               eval (kubectl completion fish)
               eval (jira completion fish)
               # eval (circleci completion fish)
+
+              abbr --add "kd" "kubectl --context mekorp-dev"
+              abbr --add "kp" "kubectl --context mekorp-prod"
+              abbr --add "kl" "kubectl --context minikube"
             '';
             passthru.fishCmd = "fish -C ${pkgs.lib.strings.escapeShellArg passthru.fishHook}";
           };
